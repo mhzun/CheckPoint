@@ -1,0 +1,36 @@
+# 隔离测试环境（v1.3.0）：独立容器 + 临时 DB（容器重建即清空），不接触生产数据。
+# 用法（在 VM /opt/checkpoint）：
+#   sudo docker compose -f docker-compose.test.yml up -d --force-recreate
+#   sudo docker compose -f docker-compose.test.yml exec -T -e BASE_URL=https://127.0.0.1:8000 checkpoint-test python test_api.py func
+#   sudo docker compose -f docker-compose.test.yml down
+services:
+  checkpoint-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: checkpoint-auth:1.3.0
+    container_name: checkpoint-test
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./certs:/certs:ro
+    environment:
+      ADMIN_KEY: TEST-ONLY-KEY-not-for-production
+      SIGN_PRIVATE_KEY: ${SIGN_PRIVATE_KEY:-}
+      DB_PATH: /tmp/db/checkpoint-test.db
+      AUDIT_LOG_PATH: /tmp/db/audit.jsonl
+      TRUST_PROXY: "0"
+      TOKEN_TTL_DAYS: "30"
+      # 测试实例的限流参数可调（fuzz/load 用放大值）
+      RATE_IP_LIMIT: ${TEST_RATE_IP_LIMIT:-30}
+      RATE_ACTIVATE_LIMIT: ${TEST_RATE_ACTIVATE_LIMIT:-10}
+      RATE_LOGIN_FAIL_LIMIT: ${TEST_RATE_LOGIN_FAIL_LIMIT:-8}
+      REBIND_GRACE_HOURS: "24"

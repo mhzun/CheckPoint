@@ -1,0 +1,506 @@
+{
+  "project": "CheckPoint",
+  "api_version": "1.3.0",
+  "updated_at": "2026-11-18",
+  "base_url_local": "https://127.0.0.1:8080",
+  "protocol": "HTTPS (TLS，自签名证书 + 客户端证书锁定；生产可由反代替换为 CA 证书)",
+  "content_type": "application/json",
+  "encoding": "UTF-8",
+  "common_notes": [
+    "【v1.3.0】新增可选配置：REGISTER_ENABLED（关闭注册）、ADMIN_ALLOW_IPS（管理员 IP 白名单）、MIN_CLIENT_VERSION（低版本 426）",
+    "【v1.3.0】新增审计日志（data/audit.jsonl，JSONL，20MB 轮转）：管理员全部操作与鉴权失败",
+    "【v1.3.0】管理员新增 /admin/revoke_batch（按批次吊销未使用卡密）与 /admin/rebind（改绑/解绑）",
+    "【v1.3.0】激活支持宽限期改绑：首次绑定后 REBIND_GRACE_HOURS（默认 24h）内可换机器；超期仅管理员可改绑",
+    "【v1.3.0】登录为单会话：同一账号新登录会注销旧的登录 token（旧 token 立即失效）",
+    "【v1.2.0】传输层升级为 TLS：服务器 /certs 存在证书时自动以 HTTPS 监听；客户端对 https 地址强制校验证书 SHA-256 指纹（内置默认指纹，配置 cert_sha256 可覆盖）",
+    "所有接口均为 POST（/health 为 GET），请求体为 JSON",
+    "所有响应 HTTP 状态码：成功与业务失败均为 200；管理员 Key 错误为 403；限流为 429；参数校验失败为 422；请求体超过 16KB 为 413",
+    "业务错误统一用 code 字段表达：code=0 成功，code=1 业务失败",
+    "msg 一律为中文",
+    "【v1.1.0 新增】客户端每次请求应在请求体中加入 nonce（URL-safe base64，8-64 字符）；服务端会把 nonce 原样回显到响应 JSON 顶层字段 nonce",
+    "【v1.1.0 新增】除 /health 外，服务端对所有 JSON 响应做 ECDSA P-256/SHA-256 签名（签名内容为响应完整字节），DER 编码 base64 后放响应头 X-Signature；客户端内置对应公钥",
+    "token 由 secrets.token_urlsafe(32) 生成，长度为 43 个字符（URL-safe base64 无填充），客户端应存为变长字符串；数据库中仅存 SHA-256 哈希",
+    "【v1.1.0 新增】token 滑动有效期：自最后一次使用（last_seen）起 TOKEN_TTL_DAYS 天（默认 30），超期 token 失效并被清理；卡密支持同一机器码重新激活以补发新 token",
+    "所有入参在服务端做长度与格式校验，超限返回 HTTP 422 或 code=1（详见各字段说明）",
+    "生产环境必须使用 HTTPS，禁止明文 HTTP 传输 token 与密码",
+    "【v1.2.0】客户端新增 --raw 前缀：stdout 输出 {\"code\":0,\"raw\":\"<响应原始字节 base64>\",\"sig\":\"<X-Signature>\"}，主程序可用内置公钥独立验签，不信任客户端本身"
+  ],
+  "signature": {
+    "algorithm": "ECDSA P-256 / SHA-256，签名为 DER 编码后 base64",
+    "signed_content": "完整响应体字节（含回显的 nonce 字段）",
+    "header": "X-Signature",
+    "client_verification": "客户端内置 SPKI DER base64 公钥；code=0 响应必须同时满足：签名验证通过 + 响应 nonce == 请求 nonce，否则客户端输出 {\"code\":-1,...} 且退出码 1",
+    "exceptions": "/health 不签名；中间件生成的 429/408/413 不签名（均为失败路径）",
+    "key_management": "私钥为 PKCS#8 DER 的 base64 单行，存于服务端环境变量 SIGN_PRIVATE_KEY；公钥以 base64 形式编译进客户端源码（ResponseSignature.PublicKeyBase64）",
+    "test_public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEf1CVWx8assqziHp/D30BZAh/AaI24ej/k3uD96gSBJtjCpgVVKSohxOUynJIHENoJuTRUkWAHs/0tcpN4oxAOQ=="
+  },
+  "error_codes": {
+    "http_403": "X-Admin-Key 缺失或不匹配",
+    "http_408": "请求体读取超时：单次 receive 5 秒或总时长 15 秒（v1.2.0 增加总时长上限，防 slow-drip）",
+    "http_413": "请求体超过 16KB",
+    "http_422": "请求体缺失、JSON 非法或字段类型错误（msg 为中文：请求参数缺失或类型不正确）",
+    "http_429": "触发限流（同 IP 30 次/分钟；同 machine_code 10 次激活/分钟；同用户名+IP 8 次登录失败/分钟），msg 为中文并带 Retry-After: 60",
+    "http_500": "服务端内部错误",
+    "business_error": "字段格式/长度不合法时返回 HTTP 200 + code=1 + 中文 msg，由服务端业务层统一判定，客户端按 msg 提示即可",
+    "http_503": "服务繁忙（DB 瞬态锁竞争等），带 Retry-After: 5，稍后重试",
+    "http_426": "客户端版本过低（服务端配置 MIN_CLIENT_VERSION 且请求缺少/低于该版本头 X-Client-Version）"
+  },
+  "schemas": {
+    "StandardResponse": {
+      "code": "integer, 0=成功, 1=业务失败",
+      "msg": "string, 中文提示",
+      "data": "object|null, 仅 code=0 时可能返回",
+      "nonce": "string, 可选。仅当请求携带合法 nonce 时回显（顶层字段，v1.1.0 新增）"
+    }
+  },
+  "endpoints": [
+    {
+      "name": "register",
+      "url": "/register",
+      "method": "POST",
+      "auth": "none",
+      "request": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "constraints": "3-32 位，允许字母/数字/下划线，正则 ^[A-Za-z0-9_]{3,32}$",
+          "description": "用户名，全局唯一"
+        },
+        "password": {
+          "type": "string",
+          "required": true,
+          "constraints": "8-64 位（按字符计）；不得包含控制字符（含 NUL）；必须可 UTF-8 编码",
+          "description": "明文密码，仅用于传输，服务端 bcrypt(rounds=12) 哈希后存储"
+        },
+        "nonce": {
+          "type": "string",
+          "required": false,
+          "constraints": "URL-safe base64，8-64 字符",
+          "description": "客户端生成的随机数，响应原样回显并纳入签名"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "注册成功",
+        "data": null
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "用户名已存在",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "密码包含非法控制字符 / 密码包含非法字符",
+          "http_status": 200
+        }
+      ],
+      "notes": [
+        "口令长度在 bcrypt 前做 UTF-8 字节校验，超过 72 字节会被拒绝（bcrypt 硬限制）",
+        "用户名重复判定依赖数据库 UNIQUE 约束，并发下不会产生重复账号"
+      ]
+    },
+    {
+      "name": "login",
+      "url": "/login",
+      "method": "POST",
+      "auth": "none",
+      "request": {
+        "username": {
+          "type": "string",
+          "required": true,
+          "constraints": "3-32 位，^[A-Za-z0-9_]{3,32}$"
+        },
+        "password": {
+          "type": "string",
+          "required": true,
+          "constraints": "8-64 位，不含控制字符"
+        },
+        "nonce": {
+          "type": "string",
+          "required": false,
+          "constraints": "URL-safe base64，8-64 字符"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "登录成功",
+        "data": {
+          "token": "string, secrets.token_urlsafe(32) 生成，当前实现长度 43 字符，客户端按变长字符串处理"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "用户名或密码错误",
+          "http_status": 200
+        }
+      ],
+      "http_429": "同一「用户名+IP」每分钟累计 8 次登录失败后，该用户名+IP 的所有登录尝试（含正确密码）返回 429，持续到滑动窗口滑出",
+      "notes": [
+        "不区分“用户不存在”与“密码错误”，防止用户名枚举",
+        "登录 token 记录在 activations 表中（license_key 为 NULL，machine_code 为空字符串），仅存 SHA-256 哈希",
+        "登录 token 同样受滑动有效期约束：连续 TOKEN_TTL_DAYS 天不使用即失效",
+        "【v1.3.0】单会话：新登录删除该用户旧的登录 token（表中 license_key IS NULL 且 user_id 相同）"
+      ]
+    },
+    {
+      "name": "activate",
+      "url": "/activate",
+      "method": "POST",
+      "auth": "none",
+      "request": {
+        "key": {
+          "type": "string",
+          "required": true,
+          "constraints": "严格匹配 ^VIP-[A-Z2-9]{8}-[A-Z2-9]{8}-[A-Z2-9]{8}$（大写字母+数字，排除 I/O/0/1），服务端自动转大写",
+          "description": "卡密"
+        },
+        "machine_code": {
+          "type": "string",
+          "required": true,
+          "constraints": "非空，1-128 位，服务端不做格式校验，仅做清洗（去控制字符→去首尾空白→截断 128）与参数化存储",
+          "description": "客户端生成的机器指纹"
+        },
+        "nonce": {
+          "type": "string",
+          "required": false,
+          "constraints": "URL-safe base64，8-64 字符"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "激活成功",
+        "data": {
+          "token": "string, secrets.token_urlsafe(32)"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "卡密无效或已失效",
+          "http_status": 200,
+          "note": "卡密不存在 / 已撤销 / 已过期 / 已绑定其他机器 四种情况返回完全相同的文案与相同耗时路径，禁止客户端据此区分"
+        },
+        {
+          "code": 1,
+          "msg": "机器码不能为空 或 机器码长度不能超过 128 位",
+          "http_status": 200
+        }
+      ],
+      "notes": [
+        "首次激活：licenses.status 置为 'used'，bound_machine 写入 machine_code",
+        "同一 transaction 内更新 licenses 并插入 activations，避免并发重复激活（5 并发同卡密仅 1 成功）",
+        "token 数据库中仅存 SHA-256 哈希，同一卡密同一机器可存在多条激活记录（历史 token 均有效直至滑动过期）",
+        "【v1.3.0 语义】首次激活绑定 machine_code；同机器重新激活成功并补发新 token（旧 token 保留至过期）；不同机器在首次绑定后 REBIND_GRACE_HOURS（默认 24h）内允许改绑（旧机器全部 token 立即注销），超期拒绝（统一文案）；管理员 /admin/rebind 可解绑或指定新机器"
+      ]
+    },
+    {
+      "name": "verify",
+      "url": "/verify",
+      "method": "POST",
+      "auth": "none",
+      "request": {
+        "token": {
+          "type": "string",
+          "required": true,
+          "constraints": "长度 16-128 位，仅允许 URL-safe 字符 [A-Za-z0-9_-]"
+        },
+        "machine_code": {
+          "type": "string",
+          "required": true,
+          "constraints": "非空，1-128 位"
+        },
+        "nonce": {
+          "type": "string",
+          "required": false,
+          "constraints": "URL-safe base64，8-64 字符"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "验证通过",
+        "data": {
+          "valid": "boolean, true"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "验证失败",
+          "http_status": 200,
+          "note": "token 不存在 / machine_code 不匹配 / 卡密已过期 / 卡密已撤销 / token 超滑动有效期 均返回该文案"
+        }
+      ],
+      "notes": [
+        "验证通过时刷新 activations.last_seen 时间戳（滑动续期）",
+        "【v1.1.0 新增】滑动有效期：所有 token（含登录 token）自 last_seen 起最多存活 TOKEN_TTL_DAYS 天（默认 30），超期即失效并删除记录",
+        "过期判定以关联 licenses.expire_at 为准；status='revoked' 的卡密验证一律失败",
+        "激活 token（activations.license_key 非空）会比对 machine_code；登录 token（license_key 为 NULL）不绑定机器，只校验存在性"
+      ]
+    },
+    {
+      "name": "admin_gen_keys",
+      "url": "/admin/gen_keys",
+      "method": "POST",
+      "auth": "header",
+      "auth_header": "X-Admin-Key",
+      "auth_value_source": "环境变量 ADMIN_KEY",
+      "request": {
+        "count": {
+          "type": "integer",
+          "required": true,
+          "constraints": "1-100",
+          "description": "生成数量"
+        },
+        "expire_days": {
+          "type": "integer",
+          "required": true,
+          "constraints": "1-3650",
+          "description": "有效期天数，写入 licenses.expire_at"
+        },
+        "batch": {
+          "type": "string",
+          "required": false,
+          "constraints": "1-64 位 [A-Za-z0-9_-]；省略自动生成 B<YYYYMMDD>-<6hex>",
+          "description": "批次号（用于分销归属与批量吊销）"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "生成成功",
+        "data": {
+          "keys": "array[string], 形如 VIP-XXXXXXXX-XXXXXXXX-XXXXXXXX",
+          "batch": "string, 本批卡密的批次号"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "管理员密钥未配置",
+          "http_status": 403,
+          "note": "服务端未设置 ADMIN_KEY 时一律拒绝"
+        },
+        {
+          "code": 1,
+          "msg": "无权限访问",
+          "http_status": 403,
+          "note": "X-Admin-Key 缺失或不匹配"
+        }
+      ],
+      "notes": [
+        "卡密生成使用 secrets.choice + 排除易混淆字符集 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'（32 字符集，24 位随机 ≈ 120 bit 熵）",
+        "生成过程有唯一性冲突重试机制",
+        "【v1.3.0】响应新增 batch 字段；生成事件写审计日志"
+      ]
+    },
+    {
+      "name": "admin_revoke",
+      "url": "/admin/revoke",
+      "method": "POST",
+      "auth": "header",
+      "auth_header": "X-Admin-Key",
+      "auth_value_source": "环境变量 ADMIN_KEY",
+      "request": {
+        "key": {
+          "type": "string",
+          "required": true,
+          "constraints": "^VIP-[A-Z2-9]{8}-[A-Z2-9]{8}-[A-Z2-9]{8}$（自动转大写）"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "撤销成功",
+        "data": {
+          "key": "string, 被撤销的卡密",
+          "status": "string, 'revoked'"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "卡密不存在",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "卡密格式不正确",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "无权限访问 / 管理员密钥未配置",
+          "http_status": 403
+        }
+      ],
+      "notes": [
+        "【v1.1.0 新增】撤销后：该卡密无法再次激活（与其他失败文案一致，不泄露状态），其已签发的 token 全部立即失效（/verify 返回验证失败）",
+        "撤销操作幂等：对已撤销卡密再次撤销返回成功",
+        "【v1.3.0】操作写审计日志"
+      ]
+    },
+    {
+      "name": "health",
+      "url": "/health",
+      "method": "GET",
+      "auth": "none",
+      "purpose": "运维存活探针（Docker healthcheck 使用），非业务接口，不计入 IP 限流，不参与响应签名",
+      "request": null,
+      "response_success": {
+        "code": 0,
+        "msg": "服务正常",
+        "data": {
+          "status": "ok"
+        }
+      }
+    },
+    {
+      "name": "admin_revoke_batch",
+      "url": "/admin/revoke_batch",
+      "method": "POST",
+      "auth": "header",
+      "auth_header": "X-Admin-Key",
+      "request": {
+        "batch": {
+          "type": "string",
+          "required": true,
+          "constraints": "1-64 位 [A-Za-z0-9_-]"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "批量吊销成功",
+        "data": {
+          "batch": "string",
+          "revoked_count": "integer"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "批次号格式不正确",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "无权限访问 / 管理员密钥未配置",
+          "http_status": 403
+        }
+      ],
+      "notes": [
+        "【v1.3.0 新增】只吊销该批次中 status='unused' 的卡密（泄露/分销事故止损）；已激活用户不受影响（用 /admin/revoke 精确处理）；写审计"
+      ]
+    },
+    {
+      "name": "admin_rebind",
+      "url": "/admin/rebind",
+      "method": "POST",
+      "auth": "header",
+      "auth_header": "X-Admin-Key",
+      "request": {
+        "key": {
+          "type": "string",
+          "required": true,
+          "constraints": "VIP-..."
+        },
+        "machine_code": {
+          "type": "string|null",
+          "required": false,
+          "description": "指定新机器码=改绑；null/省略=解绑（下次激活可绑任意机器）"
+        }
+      },
+      "response_success": {
+        "code": 0,
+        "msg": "改绑成功",
+        "data": {
+          "key": "string",
+          "bound_machine": "string|null"
+        }
+      },
+      "response_failure": [
+        {
+          "code": 1,
+          "msg": "卡密不存在",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "卡密格式不正确",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "机器码不能为空",
+          "http_status": 200
+        },
+        {
+          "code": 1,
+          "msg": "无权限访问 / 管理员密钥未配置",
+          "http_status": 403
+        }
+      ],
+      "notes": [
+        "【v1.3.0 新增】改绑/解绑都会注销该卡密全部旧 token（旧机器立即失效）；写审计"
+      ]
+    }
+  ],
+  "database": {
+    "path_env": "DB_PATH",
+    "default": "/data/checkpoint.db",
+    "tables": {
+      "users": {
+        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "username": "TEXT UNIQUE NOT NULL",
+        "password_hash": "TEXT NOT NULL (bcrypt rounds=12)",
+        "created_at": "TEXT NOT NULL (ISO8601 UTC)"
+      },
+      "licenses": {
+        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "key": "TEXT UNIQUE NOT NULL",
+        "status": "TEXT NOT NULL DEFAULT 'unused' (unused|used|revoked)",
+        "expire_at": "TEXT NOT NULL (ISO8601 UTC)",
+        "bound_machine": "TEXT NULL",
+        "created_at": "TEXT NOT NULL (ISO8601 UTC)",
+        "bound_at": "TEXT NULL（v1.3.0：首次绑定/最近改绑时间，改绑宽限期基准）",
+        "batch": "TEXT NULL（v1.3.0：批次号，支持按批吊销）"
+      },
+      "activations": {
+        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "license_key": "TEXT NULL (登录 token 时为 NULL)",
+        "token_hash": "TEXT UNIQUE NOT NULL（v1.1.0：SHA-256 hex，原明文 token 列已迁移）",
+        "machine_code": "TEXT NOT NULL",
+        "created_at": "TEXT NOT NULL (ISO8601 UTC)",
+        "last_seen": "TEXT NOT NULL (ISO8601 UTC，滑动过期基准)",
+        "user_id": "INTEGER NULL（v1.3.0：登录 token 归属用户，用于单会话注销）"
+      }
+    },
+    "migration": "v1.0→v1.1 明文 token 哈希化；v1.1→v1.2 last_seen 索引；v1.2→v1.3 增列 licenses.bound_at/batch 与 activations.user_id（幂等，事务保护）"
+  },
+  "server_config": {
+    "DB_PATH": "数据库路径，默认 /data/checkpoint.db",
+    "ADMIN_KEY": "管理员密钥（建议 >= 32 字符高熵）",
+    "SIGN_PRIVATE_KEY": "响应签名私钥（PKCS#8 DER base64 单行），未设置时响应不签名",
+    "TRUST_PROXY": "1 = 信任反代追加的 X-Forwarded-For 最右侧地址（仅反代后开启；左侧值可被客户端伪造，永不采信）",
+    "TOKEN_TTL_DAYS": "token 滑动有效期天数，默认 30；过期行在启动与每次登录/激活时主动清理（v1.2.0，防表膨胀）",
+    "--no-proxy-headers": "v1.2.0 强制：uvicorn 层不再处理 X-Forwarded-For，XFF 仅由应用层 TRUST_PROXY 单点控制（修复轮换 XFF 绕过限流）",
+    "REGISTER_ENABLED": "1=开放注册；0=关闭（/register 返回 403）",
+    "ADMIN_ALLOW_IPS": "管理员接口 IP 白名单（逗号分隔；为空=不限制；生产强烈建议配置）",
+    "MIN_CLIENT_VERSION": "最低客户端版本（如 1.3.0）；业务接口低于该版本返回 426",
+    "REBIND_GRACE_HOURS": "首次绑定后允许改绑的宽限小时数，默认 24；0=禁止改绑",
+    "AUDIT_LOG_PATH": "审计日志路径，默认 DB 同目录 audit.jsonl；20MB 轮转一代",
+    "RATE_IP_LIMIT": "同 IP 每分钟请求数，默认 30（负载测试专用覆盖，生产保持默认）",
+    "RATE_ACTIVATE_LIMIT": "同 machine_code 每分钟激活尝试，默认 10",
+    "RATE_LOGIN_FAIL_LIMIT": "同用户名+IP 每分钟登录失败数，默认 8"
+  },
+  "tls": {
+    "server": "自签名 ECDSA P-256 证书（10 年，SAN 含部署 IP checkpoint.example.com / localhost / checkpoint.local），cert.pem 公开入库，key.pem 仅存 VM certs 目录（600，属主 10001）",
+    "client_pinning": "内置 DefaultCertPin（证书 DER 的 SHA-256 十六进制）；https 连接时指纹不匹配即拒绝（防中间人）；配置文件 cert_sha256（64 位十六进制）可覆盖，供开发环境换证书",
+    "cert_sha256": "1ae410c6fbdd47a591c0b2c1b6122046284725d6ecc38a7ab8c4c268a3aaf383",
+    "note": "明文 HTTP 仅限本地开发（无证书时）；生产禁止——v1.1.0 攻防演练证明明文可被窃听凭据并篡改请求偷走卡密绑定"
+  },
+  "client_modes": {
+    "default": "输出遮蔽后的响应 JSON（token/key 等替换为 ***）",
+    "raw": "checkpoint.exe --raw <命令> ... 输出原始响应字节 base64 + 签名头，供主程序自行验签（纵深防御，见 ATTACK-REPORT §四）"
+  }
+}

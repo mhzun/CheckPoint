@@ -1,0 +1,44 @@
+<Project>
+  <!--
+    自包含单文件版（目标机器无需安装 .NET 运行时）
+    发布：dotnet publish .\client\CheckPointClient-SelfContained.csproj -c Release -o .\client\dist\self-contained
+
+    注意：两个 csproj 与 Program.cs 同目录。为了让两个项目的 obj/bin 互不覆盖，
+          必须在导入 Sdk.props 之前指定独立的中间/输出目录。
+  -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>obj\self-contained\</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin\self-contained\</BaseOutputPath>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>checkpoint</AssemblyName>
+    <RootNamespace>CheckPointClient</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+
+    <!-- 同目录有两个项目，必须排除全部 obj/bin/dist，避免把另一个项目的生成文件当源码编译 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**;dist\**</DefaultItemExcludes>
+
+    <!-- 自包含单文件 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- 不产出 pdb，减小体积 -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

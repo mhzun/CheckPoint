@@ -1,0 +1,46 @@
+# ===== 秘密（绝不提交）=====
+.env
+.env.*
+!.env.example
+server/certs/key.pem
+*.pem
+!server/certs/cert.pem
+*.key
+*.p12
+*.pfx
+
+# ===== 数据与运行时 =====
+data/
+logs/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.db.gz
+*.log
+
+# ===== 本地构建产物 =====
+__pycache__/
+*.pyc
+bin/
+obj/
+dist/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# ===== 安全审计与攻击留痕（绝不提交）=====
+.attack/
+.audit-tmp/
+test-evidence/
+test-evidence-v2/
+test-evidence-v3/
+*.pcap
+mitm-*.log
+
+# ===== 系统 =====
+Thumbs.db
+.DS_Store
+desktop.ini

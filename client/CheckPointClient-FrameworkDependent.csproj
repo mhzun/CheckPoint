@@ -1,0 +1,41 @@
+<Project>
+  <!--
+    依赖系统 .NET 版（体积约 200KB，运行机器需安装 .NET 8 Desktop/Runtime）
+    发布：dotnet publish .\client\CheckPointClient-FrameworkDependent.csproj -c Release -o .\client\dist\framework-dependent
+
+    注意：与自包含版共用 Program.cs，使用独立的 obj/bin 目录避免互相覆盖。
+  -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>obj\framework-dependent\</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin\framework-dependent\</BaseOutputPath>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>checkpoint</AssemblyName>
+    <RootNamespace>CheckPointClient</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+
+    <!-- 同目录有两个项目，必须排除全部 obj/bin/dist，避免把另一个项目的生成文件当源码编译 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**;dist\**</DefaultItemExcludes>
+
+    <!-- 依赖系统运行时，单文件发布以保持约 200KB -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- 不产出 pdb，减小体积 -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

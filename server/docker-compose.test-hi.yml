@@ -1,0 +1,29 @@
+# 高限流测试实例（fuzz / 负载 / 走私探测专用）：仅放大限流，其余加固不变。
+services:
+  checkpoint-test-hi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: checkpoint-auth:1.3.0
+    container_name: checkpoint-test-hi
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./certs:/certs:ro
+    environment:
+      ADMIN_KEY: TEST-ONLY-KEY-not-for-production
+      SIGN_PRIVATE_KEY: ${SIGN_PRIVATE_KEY:-}
+      DB_PATH: /tmp/db/checkpoint-test-hi.db
+      AUDIT_LOG_PATH: /tmp/db/audit-hi.jsonl
+      TRUST_PROXY: "0"
+      RATE_IP_LIMIT: "10000000"
+      RATE_ACTIVATE_LIMIT: "1000000"
+      RATE_LOGIN_FAIL_LIMIT: "1000000"
